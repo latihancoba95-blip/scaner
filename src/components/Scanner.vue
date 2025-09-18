@@ -3,7 +3,7 @@ import { BrowserQRCodeReader } from "@zxing/browser";
 import { ref, onMounted, onBeforeUnmount, nextTick, watch } from "vue";
 import axios from "axios";
 
-const API_BASE = "http://localhost:3000";
+const API_BASE = "https://tbn4smf2-3000.asse.devtunnels.ms";
 
 const result = ref("");
 const status = ref("");
