@@ -14,44 +14,50 @@ const lastActivity = ref({});
 const EmployeeName = ref("");
 const EmployeeId = ref("");
 const EmployeeDivisi = ref("");
-const promptSession = ref(0); // force remount modal
+const promptSession = ref(0);
 const selectedKeterangan = ref(null);
 const keteranganOptions = ["Toilet", "Makan", "Sholat", "Istirahat", "Lainnya"];
 const lainnyaInput = ref(null);
 
 const reader = new BrowserQRCodeReader();
 let controls = null;
-let scanningLocked = false; // cegah re-entrancy
+let scanningLocked = false;
 const devices = ref([]);
 const selectedDeviceId = ref(null);
-// Ambil daftar kamera
+
+// ==== Ambil daftar kamera (pastikan izin sudah diberikan) ====
 const loadDevices = async () => {
   try {
-    const videoInputDevices = await BrowserQRCodeReader.listVideoInputDevices();
-    devices.value = videoInputDevices;
-    // Default: kamera pertama
-    if (videoInputDevices.length > 0) {
-      selectedDeviceId.value = videoInputDevices[0].deviceId;
+    // minta izin dulu agar enumerateDevices lengkap
+    const tmpStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: false,
+    });
+    const all = await navigator.mediaDevices.enumerateDevices();
+    const cams = all.filter((d) => d.kind === "videoinput");
+    devices.value = cams;
+
+    if (cams.length > 0) {
+      selectedDeviceId.value = cams[0].deviceId || null;
     }
+    // hentikan stream sementara
+    tmpStream.getTracks().forEach((t) => t.stop());
   } catch (err) {
     console.error("Gagal ambil kamera", err);
+    status.value = "Tidak bisa akses kamera.";
   }
 };
 
-// ===== HTTP helpers =====
+// ==== HTTP helpers ====
 const checkActivity = async (id) => {
-  // GET /activity/check/:id  -> { active: boolean, ... }
   const { data } = await axios.get(
     `${API_BASE}/activity/check/${encodeURIComponent(id)}`
   );
-  // console.log(data);
   EmployeeId.value = data.karyawan_id;
   EmployeeName.value = data.nama;
   EmployeeDivisi.value = data.divisi;
-
-  return data; // expected: { active: boolean, ... }
+  return data;
 };
-
 const postActivityIn = async (id) => {
   const { data } = await axios.post(`${API_BASE}/activity/in`, {
     karyawan_id: id,
@@ -59,31 +65,6 @@ const postActivityIn = async (id) => {
   getLastActivity();
   return data;
 };
-
-const getLastActivity = async () => {
-  const { data } = await axios.get(`${API_BASE}/activity/last`);
-  // console.log(data);
-
-  lastActivity.value = data;
-  return data;
-};
-
-onMounted(async () => {
-  await loadDevices();
-  startScanning();
-});
-
-onBeforeUnmount(() => {
-  stopScanning();
-});
-
-const switchCamera = async (deviceId) => {
-  stopScanning();
-  selectedDeviceId.value = deviceId;
-  await nextTick();
-  startScanning();
-};
-
 const postActivityOut = async (id, jenis) => {
   const { data } = await axios.post(`${API_BASE}/activity/out`, {
     karyawan_id: id,
@@ -92,17 +73,37 @@ const postActivityOut = async (id, jenis) => {
   getLastActivity();
   return data;
 };
+const getLastActivity = async () => {
+  const { data } = await axios.get(`${API_BASE}/activity/last`);
+  lastActivity.value = data;
+  return data;
+};
 
-// ===== Camera controls =====
-// Start scanning dengan kamera terpilih
+// ==== Start / Stop kamera ====
 const startScanning = async () => {
   try {
     const previewElem = document.getElementById("preview");
-    controls = await reader.decodeFromVideoDevice(
-      selectedDeviceId.value, // gunakan kamera sesuai pilihan
-      previewElem,
-      handleScan
-    );
+    stopScanning();
+
+    if (selectedDeviceId.value) {
+      // ada deviceId valid
+      controls = await reader.decodeFromVideoDevice(
+        selectedDeviceId.value,
+        previewElem,
+        handleScan
+      );
+    } else {
+      // fallback: kamera belakang
+      const constraints = { video: { facingMode: { ideal: "environment" } } };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      previewElem.srcObject = stream;
+      await previewElem.play();
+      controls = await reader.decodeFromVideoDevice(
+        null,
+        previewElem,
+        handleScan
+      );
+    }
   } catch (e) {
     console.error(e);
     status.value = "Gagal mengakses kamera.";
@@ -114,22 +115,35 @@ const stopScanning = () => {
     controls.stop();
     controls = null;
   }
+  const previewElem = document.getElementById("preview");
+  const s = previewElem?.srcObject;
+  if (s && typeof s.getTracks === "function") {
+    s.getTracks().forEach((t) => t.stop());
+    previewElem.srcObject = null;
+  }
 };
 
-// ===== Modal helpers =====
+// ==== Switch kamera ====
+const switchCamera = async (deviceId) => {
+  stopScanning();
+  selectedDeviceId.value = deviceId || null;
+  await nextTick();
+  startScanning();
+};
+
+// ==== Modal ====
 const openPrompt = async (id) => {
   pendingId.value = id;
   selectedKeterangan.value = null;
-  promptSession.value++; // paksa remount modal & radio
+  promptSession.value++;
   isPromptOpen.value = true;
   await nextTick();
 };
-
 const closePrompt = () => {
   isPromptOpen.value = false;
 };
 
-// ===== Scan handler =====
+// ==== Scan handler ====
 const handleScan = async (resultObj, err) => {
   if (err || scanningLocked || isPromptOpen.value) return;
   if (!resultObj) return;
@@ -145,13 +159,11 @@ const handleScan = async (resultObj, err) => {
     const isActive = !!check?.active;
 
     if (isActive) {
-      // sudah aktif → kirim IN
       const res = await postActivityIn(text);
       result.value = `${text} (kembali)`;
       status.value = res?.message || "Kembali berhasil";
       startScanning();
     } else {
-      // belum aktif → buka modal untuk pilih jenis (OUT)
       await openPrompt(text);
     }
   } catch (e) {
@@ -163,14 +175,13 @@ const handleScan = async (resultObj, err) => {
   }
 };
 
-// ===== Submit saat pilih keterangan =====
+// ==== Submit saat pilih keterangan ====
 const autoConfirm = async (ket) => {
   if (!pendingId.value || !ket) return;
   try {
     const res = await postActivityOut(pendingId.value, ket);
     result.value = `${pendingId.value} (keluar)`;
-    status.value = res?.message || `Keluar dengan keterangan: ${ket}`;
-    // console.log(res);
+    status.value = res?.message || `Keluar: ${ket}`;
   } catch (e) {
     console.error(e);
     status.value = e?.response?.data?.message || e.message;
@@ -181,7 +192,7 @@ const autoConfirm = async (ket) => {
   }
 };
 
-// Watcher: radio berubah → auto kirim (kecuali 'Lainnya')
+// Watcher: radio berubah → auto kirim
 watch(selectedKeterangan, async (val) => {
   if (!isPromptOpen.value) return;
   if (val === "Lainnya") {
@@ -195,26 +206,30 @@ watch(selectedKeterangan, async (val) => {
 const confirmLainnyaIfReady = async (e) => {
   const val = (e?.target?.value || "").trim();
   if (val) {
-    selectedKeterangan.value = val; // biar konsisten di UI
+    selectedKeterangan.value = val;
     await autoConfirm(val);
   }
 };
 
-// ===== Keyboard ESC untuk batal =====
+// ==== ESC untuk batal ====
 const handleEsc = (e) => {
   if (e.key === "Escape" && isPromptOpen.value) {
-    // batal pilih → lanjut scan lagi tanpa kirim
     closePrompt();
     pendingId.value = "";
     startScanning();
   }
 };
 
-onMounted(() => {
+// ==== Lifecycle ====
+onMounted(async () => {
+  await loadDevices();
+  // kalau cuma 1 device, pakai kamera belakang (selectedDeviceId = null → fallback)
+  if (devices.value.length <= 1) {
+    selectedDeviceId.value = null;
+  }
   startScanning();
   window.addEventListener("keydown", handleEsc);
 });
-
 onBeforeUnmount(() => {
   stopScanning();
   window.removeEventListener("keydown", handleEsc);
@@ -225,10 +240,16 @@ onBeforeUnmount(() => {
   <div class="p-4 flex flex-col items-center">
     <h1 class="text-xl font-bold mb-2">Scan QR Karyawan</h1>
 
-    <video id="preview" class="w-full max-w-md border rounded-lg"></video>
+    <!-- video preview -->
+    <video
+      id="preview"
+      class="w-full max-w-md border rounded-lg"
+      playsinline
+      muted
+    ></video>
 
-    <!-- Dropdown untuk pilih kamera -->
-    <div class="mt-4">
+    <!-- dropdown kamera (hanya muncul kalau >1) -->
+    <div class="mt-4" v-if="devices.length > 1">
       <label>Pilih Kamera:</label>
       <select
         v-model="selectedDeviceId"
@@ -245,12 +266,9 @@ onBeforeUnmount(() => {
       </select>
     </div>
 
-    <!-- table last activity  -->
+    <p class="text-green-600 font-semibold mt-2">{{ status }}</p>
 
-    <p class="text-green-600 font-semibold">{{ status }}</p>
-
-    <div>Last Activity</div>
-
+    <div class="mt-4">Last Activity</div>
     <table class="w-1/2 text-sm text-left rtl:text-right text-gray-500">
       <thead class="text-xs text-gray-700 uppercase bg-gray-50">
         <tr>
@@ -262,7 +280,6 @@ onBeforeUnmount(() => {
           <th>Durasi</th>
         </tr>
       </thead>
-
       <tbody class="bg-white border-b border-gray-200">
         <tr v-for="item in lastActivity" :key="item.id">
           <td>{{ item.nama }}</td>
@@ -274,7 +291,8 @@ onBeforeUnmount(() => {
         </tr>
       </tbody>
     </table>
-    <!-- Modal: key supaya remount bersih setiap buka -->
+
+    <!-- modal prompt -->
     <div
       v-if="isPromptOpen"
       :key="promptSession"
@@ -282,34 +300,21 @@ onBeforeUnmount(() => {
       aria-modal="true"
       role="dialog"
     >
-      <!-- Backdrop -->
       <div class="absolute inset-0 bg-black/50"></div>
-
-      <!-- Card -->
       <div
         class="relative w-full max-w-md mx-4 rounded-xl bg-white shadow-lg p-5"
       >
         <h2 class="text-lg font-semibold mb-3 text-gray-800">
-          Pilih Keterangan (otomatis kirim)
+          Pilih Keterangan
         </h2>
-
-        <div class="mb-4 text-sm text-gray-600">
-          ID terdeteksi:
-          <span class="font-mono font-medium text-gray-800"
-            >{{ EmployeeId }}
-          </span>
+        <div class="mb-2 text-sm">
+          ID: <span class="font-mono">{{ EmployeeId }}</span>
         </div>
-        <div class="mb-4 text-sm text-gray-600">
-          Nama
-          <span class="font-mono font-medium text-gray-800"
-            >{{ EmployeeName }}
-          </span>
+        <div class="mb-2 text-sm">
+          Nama: <span class="font-mono">{{ EmployeeName }}</span>
         </div>
-        <div class="mb-4 text-sm text-gray-600">
-          Divisi
-          <span class="font-mono font-medium text-gray-800"
-            >{{ EmployeeDivisi }}
-          </span>
+        <div class="mb-4 text-sm">
+          Divisi: <span class="font-mono">{{ EmployeeDivisi }}</span>
         </div>
 
         <div class="space-y-2 max-h-60 overflow-auto">
@@ -325,10 +330,8 @@ onBeforeUnmount(() => {
               :value="opt"
               v-model="selectedKeterangan"
             />
-            <span class="text-sm text-gray-800">{{ opt }}</span>
+            <span class="text-sm">{{ opt }}</span>
           </label>
-
-          <!-- Input 'Lainnya' -->
           <div v-if="selectedKeterangan === 'Lainnya'" class="mt-2">
             <input
               ref="lainnyaInput"
@@ -338,12 +341,8 @@ onBeforeUnmount(() => {
               @keyup.enter="confirmLainnyaIfReady"
               @blur="confirmLainnyaIfReady"
             />
-            <p class="text-xs text-gray-500 mt-1">
-              Tekan Enter untuk mengirim.
-            </p>
           </div>
         </div>
-
         <div class="mt-4 text-right">
           <button
             class="px-3 py-1 rounded-lg border hover:bg-gray-50"
