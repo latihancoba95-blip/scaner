@@ -22,6 +22,21 @@ const lainnyaInput = ref(null);
 const reader = new BrowserQRCodeReader();
 let controls = null;
 let scanningLocked = false; // cegah re-entrancy
+const devices = ref([]);
+const selectedDeviceId = ref(null);
+// Ambil daftar kamera
+const loadDevices = async () => {
+  try {
+    const videoInputDevices = await BrowserQRCodeReader.listVideoInputDevices();
+    devices.value = videoInputDevices;
+    // Default: kamera pertama
+    if (videoInputDevices.length > 0) {
+      selectedDeviceId.value = videoInputDevices[0].deviceId;
+    }
+  } catch (err) {
+    console.error("Gagal ambil kamera", err);
+  }
+};
 
 // ===== HTTP helpers =====
 const checkActivity = async (id) => {
@@ -53,9 +68,21 @@ const getLastActivity = async () => {
   return data;
 };
 
-onMounted(() => {
-  getLastActivity();
+onMounted(async () => {
+  await loadDevices();
+  startScanning();
 });
+
+onBeforeUnmount(() => {
+  stopScanning();
+});
+
+const switchCamera = async (deviceId) => {
+  stopScanning();
+  selectedDeviceId.value = deviceId;
+  await nextTick();
+  startScanning();
+};
 
 const postActivityOut = async (id, jenis) => {
   const { data } = await axios.post(`${API_BASE}/activity/out`, {
@@ -67,11 +94,12 @@ const postActivityOut = async (id, jenis) => {
 };
 
 // ===== Camera controls =====
+// Start scanning dengan kamera terpilih
 const startScanning = async () => {
   try {
     const previewElem = document.getElementById("preview");
     controls = await reader.decodeFromVideoDevice(
-      null,
+      selectedDeviceId.value, // gunakan kamera sesuai pilihan
       previewElem,
       handleScan
     );
@@ -198,6 +226,24 @@ onBeforeUnmount(() => {
     <h1 class="text-xl font-bold mb-2">Scan QR Karyawan</h1>
 
     <video id="preview" class="w-full max-w-md border rounded-lg"></video>
+
+    <!-- Dropdown untuk pilih kamera -->
+    <div class="mt-4">
+      <label>Pilih Kamera:</label>
+      <select
+        v-model="selectedDeviceId"
+        @change="switchCamera(selectedDeviceId)"
+        class="border p-1 rounded"
+      >
+        <option
+          v-for="dev in devices"
+          :key="dev.deviceId"
+          :value="dev.deviceId"
+        >
+          {{ dev.label || "Kamera " + dev.deviceId }}
+        </option>
+      </select>
+    </div>
 
     <!-- table last activity  -->
 
