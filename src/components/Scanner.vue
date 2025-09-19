@@ -228,6 +228,7 @@ onMounted(async () => {
     selectedDeviceId.value = null;
   }
   startScanning();
+  getLastActivity();
   window.addEventListener("keydown", handleEsc);
 });
 onBeforeUnmount(() => {
